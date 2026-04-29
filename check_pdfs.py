@@ -123,8 +123,9 @@ def send_email(subject, body):
     msg["From"] = sender
     msg["To"] = recipient
 
+    # Encode password as bytes to handle any special characters
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-        smtp.login(sender, password)
+        smtp.login(sender.encode('utf-8'), password.encode('utf-8'))
         smtp.send_message(msg)
     print(f"✓ Email sent to {recipient}")
 
