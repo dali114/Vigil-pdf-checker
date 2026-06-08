@@ -13,7 +13,6 @@ import requests
 from datetime import datetime
 from pathlib import Path
 
-# ── PDF URLs to monitor ───────────────────────────────────────────────────────
 PDFS = [
     {"label": "REF-96791- CDC Top 10 Tips for HPV Vaccination Success 2018",
      "url": "https://www.cdc.gov/hpv/media/pdfs/2024/07/Top10-improving-practice.pdf"},
@@ -60,17 +59,19 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 }
 
+
 def load_snapshots():
     if SNAPSHOT_FILE.exists():
         return json.loads(SNAPSHOT_FILE.read_text())
     return {}
 
+
 def save_snapshots(data):
     SNAPSHOT_FILE.write_text(json.dumps(data, indent=2))
 
+
 def check_pdf(url):
-    """Returns (status, size_bytes, content_hash) or raises."""
-    # Try HEAD first (fast, no download)
+    """Returns (status, size_bytes, content_hash, last_modified) or raises."""
     try:
         r = requests.head(url, headers=HEADERS, timeout=30, allow_redirects=True)
         if r.status_code == 200:
@@ -79,30 +80,29 @@ def check_pdf(url):
             last_mod = r.headers.get("last-modified", "")
             return r.status_code, size, etag, last_mod
         elif r.status_code in (405, 403):
-            # HEAD not allowed — fall through to GET
             pass
         else:
             return r.status_code, 0, "", ""
     except Exception:
         pass
 
-    # Fallback: GET with streaming (read only first 64KB for hash)
     r = requests.get(url, headers=HEADERS, timeout=60, stream=True, allow_redirects=True)
     if r.status_code != 200:
         return r.status_code, 0, "", ""
-    
+
     chunk = b""
     for block in r.iter_content(65536):
         chunk += block
         if len(chunk) >= 65536:
             break
     r.close()
-    
+
     content_hash = hashlib.md5(chunk).hexdigest()
     size = int(r.headers.get("content-length", len(chunk)))
     etag = r.headers.get("etag", "")
     last_mod = r.headers.get("last-modified", "")
     return r.status_code, size, etag or content_hash, last_mod
+
 
 def send_email(subject, body):
     """Send email via Gmail SMTP using GitHub Actions secrets."""
@@ -114,7 +114,7 @@ def send_email(subject, body):
     recipient = os.environ.get("NOTIFY_EMAIL", sender)
 
     if not sender or not password:
-        print("⚠ Email not configured — printing report instead:")
+        print("Email not configured — printing report instead:")
         print(body)
         return
 
@@ -123,24 +123,24 @@ def send_email(subject, body):
     msg["From"] = sender
     msg["To"] = recipient
 
-    # Encode password as bytes to handle any special characters
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
         smtp.login(sender, password)
         smtp.send_message(msg)
-    print(f"✓ Email sent to {recipient}")
+    print(f"Email sent to {recipient}")
+
 
 def main():
     today = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     snapshots = load_snapshots()
-    
+
     broken = []
     changed = []
     ok = []
     errors = []
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Vigil PDF Checker — {today}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     for pdf in PDFS:
         label = pdf["label"]
@@ -152,38 +152,34 @@ def main():
             status, size, etag, last_mod = check_pdf(url)
 
             if status != 200:
-                broken.append({
-                    "label": label, "url": url,
-                    "reason": f"HTTP {status}"
-                })
-                print(f"  ✗ BROKEN — HTTP {status}")
+                broken.append({"label": label, "url": url, "reason": f"HTTP {status}"})
+                print(f"  BROKEN — HTTP {status}")
                 snapshots[url] = {**prev, "last_status": status, "checked": today}
                 continue
 
-            # Compare against previous snapshot
             prev_size = prev.get("size", 0)
             prev_etag = prev.get("etag", "")
             prev_mod = prev.get("last_modified", "")
 
-            size_changed = prev_size and abs(size - prev_size) > 1024  # >1KB difference
+            size_changed = prev_size and abs(size - prev_size) > 1024
             etag_changed = prev_etag and etag and etag != prev_etag
             mod_changed = prev_mod and last_mod and last_mod != prev_mod
 
             if size_changed or etag_changed or mod_changed:
                 reasons = []
-                if size_changed: reasons.append(f"size {prev_size:,} → {size:,} bytes")
-                if etag_changed: reasons.append("ETag changed")
-                if mod_changed: reasons.append(f"last-modified: {prev_mod} → {last_mod}")
-                changed.append({
-                    "label": label, "url": url,
-                    "reasons": ", ".join(reasons)
-                })
-                print(f"  ⚡ CHANGED — {', '.join(reasons)}")
+                if size_changed:
+                    reasons.append(f"size {prev_size:,} -> {size:,} bytes")
+                if etag_changed:
+                    reasons.append("ETag changed")
+                if mod_changed:
+                    reasons.append(f"last-modified: {prev_mod} -> {last_mod}")
+                changed.append({"label": label, "url": url, "reasons": ", ".join(reasons)})
+                print(f"  CHANGED — {', '.join(reasons)}")
             elif not prev:
-                print(f"  ✓ First check — snapshot saved (size: {size:,} bytes)")
+                print(f"  First check — snapshot saved (size: {size:,} bytes)")
             else:
                 ok.append(label)
-                print(f"  ✓ OK (size: {size:,} bytes)")
+                print(f"  OK (size: {size:,} bytes)")
 
             snapshots[url] = {
                 "label": label,
@@ -191,67 +187,71 @@ def main():
                 "etag": etag,
                 "last_modified": last_mod,
                 "last_status": status,
-                "checked": today
+                "checked": today,
             }
 
         except Exception as e:
             errors.append({"label": label, "url": url, "error": str(e)})
-            print(f"  ✗ ERROR — {e}")
+            print(f"  ERROR — {e}")
 
     save_snapshots(snapshots)
 
-    # ── Build report ──────────────────────────────────────────────────────────
     needs_alert = broken or changed or errors
-    
-    print(f"\n{'='*60}")
+
+    print(f"\n{'=' * 60}")
     print(f"Summary: {len(ok)} OK | {len(changed)} changed | {len(broken)} broken | {len(errors)} errors")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     if not needs_alert:
-        print("✓ All PDFs OK — no alert needed.")
+        print("All PDFs OK — no alert needed.")
         return
 
     lines = [
         f"Vigil PDF Check Report — {today}",
-        f"{'='*50}",
+        "=" * 50,
         "",
     ]
 
     if broken:
-        lines.append(f"🔴 BROKEN LINKS ({len(broken)})")
+        lines.append(f"BROKEN LINKS ({len(broken)})")
         lines.append("These PDFs returned an error — the link may be dead or moved:")
         for b in broken:
-            lines.append(f"\n  • {b['label']}")
+            lines.append("")
+            lines.append(f"  - {b['label']}")
             lines.append(f"    {b['url']}")
             lines.append(f"    Reason: {b['reason']}")
         lines.append("")
 
     if changed:
-        lines.append(f"⚡ CHANGED ({len(changed)})")
+        lines.append(f"CHANGED ({len(changed)})")
         lines.append("These PDFs appear to have been updated:")
         for c in changed:
-            lines.append(f"\n  • {c['label']}")
+            lines.append("")
+            lines.append(f"  - {c['label']}")
             lines.append(f"    {c['url']}")
             lines.append(f"    What changed: {c['reasons']}")
         lines.append("")
 
     if errors:
-        lines.append(f"⚠ CHECK ERRORS ({len(errors)})")
+        lines.append(f"CHECK ERRORS ({len(errors)})")
         lines.append("These couldn't be reached (may be temporary):")
         for e in errors:
-            lines.append(f"\n  • {e['label']}")
+            lines.append("")
+            lines.append(f"  - {e['label']}")
             lines.append(f"    {e['url']}")
             lines.append(f"    Error: {e['error']}")
         lines.append("")
 
-    lines.append(f"✓ {len(ok)} PDFs checked OK with no changes.")
-    lines.append(f"\n— Vigil PDF Checker")
+    lines.append(f"{len(ok)} PDFs checked OK with no changes.")
+    lines.append("")
+    lines.append("— Vigil PDF Checker")
 
     body = "\n".join(lines)
-    subject = f"⚠ Vigil: {len(broken)} broken, {len(changed)} changed PDFs — {today[:10]}"
-    
+    subject = f"Vigil: {len(broken)} broken, {len(changed)} changed PDFs — {today[:10]}"
+
     send_email(subject, body)
     print(body)
+
 
 if __name__ == "__main__":
     main()
